@@ -3,7 +3,9 @@ import os
 from cg.api import AreaType, Observation, Option, OptionType, SelectContext, to_observation_class
 
 
-RIOLU = 1208
+# Card IDs from EN_Card_Data.csv. The simulator only understands these numbers,
+# so we give the important cards readable names here.
+RIOLU = 677
 LUCARIO = 678
 LUNATONE = 675
 SOLROCK = 676
@@ -25,7 +27,10 @@ WALLYS_COMPASSION = 1229
 BOSSES_ORDERS = 1182
 GRAVITY_MOUNTAIN = 1252
 
+# Basic Pokemon that can be played directly onto the board.
 BASIC_POKEMON = {RIOLU, LUNATONE, SOLROCK, MAKUHITA, MEOWTH}
+
+# Which Pokemon we prefer when choosing our starting Active Pokemon.
 STARTER_PRIORITY = {
     RIOLU: 700,
     SOLROCK: 600,
@@ -34,6 +39,7 @@ STARTER_PRIORITY = {
     MEOWTH: 50,
 }
 
+# Which Pokemon we want to find first when a Trainer searches the deck.
 POKEMON_SEARCH_PRIORITY = {
     RIOLU: 700,
     LUCARIO: 650,
@@ -44,6 +50,7 @@ POKEMON_SEARCH_PRIORITY = {
     MEOWTH: 50,
 }
 
+# Which Pokemon should receive manual Energy attachments first.
 ENERGY_TARGET_PRIORITY = {
     RIOLU: 700,
     LUCARIO: 650,
@@ -54,6 +61,8 @@ ENERGY_TARGET_PRIORITY = {
     MEOWTH: 50,
 }
 
+# How much we want to play each Trainer during the main turn.
+# Situational Trainers start lower and get boosted later when attacking is possible.
 PLAY_TRAINER_PRIORITY = {
     FIGHTING_GONG: 700,
     POKE_PAD: 650,
@@ -69,6 +78,8 @@ PLAY_TRAINER_PRIORITY = {
     WALLYS_COMPASSION: 150,
 }
 
+# When the game asks us to discard cards, higher numbers mean "discard this first."
+# Fighting Energy is high because Mega Lucario can reuse it from the discard pile.
 DISCARD_PRIORITY = {
     FIGHTING_ENERGY: 700,
     GRAVITY_MOUNTAIN: 500,
@@ -89,6 +100,7 @@ DISCARD_PRIORITY = {
     RIOLU: 40,
 }
 
+
 def read_deck_csv() -> list[int]:
     """Read deck.csv.
     
@@ -106,18 +118,21 @@ def read_deck_csv() -> list[int]:
     return deck
 
 
+# Get our player state from the observation.
 def _your_state(obs: Observation):
     if obs.current is None:
         return None
     return obs.current.players[obs.current.yourIndex]
 
 
+# Get the opponent's player state from the observation.
 def _opponent_state(obs: Observation):
     if obs.current is None:
         return None
     return obs.current.players[1 - obs.current.yourIndex]
 
 
+# Return the IDs of our Pokemon already in play, both Active and Benched.
 def _pokemon_ids_in_play(obs: Observation) -> set[int]:
     player = _your_state(obs)
     if player is None:
@@ -127,6 +142,7 @@ def _pokemon_ids_in_play(obs: Observation) -> set[int]:
     return ids
 
 
+# Return the IDs of cards currently in our hand.
 def _hand_ids(obs: Observation) -> list[int]:
     player = _your_state(obs)
     if player is None or player.hand is None:
@@ -134,6 +150,8 @@ def _hand_ids(obs: Observation) -> list[int]:
     return [card.id for card in player.hand]
 
 
+# Convert an option's area/index pair into the actual card object it points at.
+# The simulator stores cards in different areas like HAND, DECK, ACTIVE, and BENCH.
 def _card_from_area(obs: Observation, area: AreaType | int | None, index: int | None, player_index: int | None):
     if obs.current is None or area is None or index is None:
         return None
@@ -173,6 +191,8 @@ def _card_from_area(obs: Observation, area: AreaType | int | None, index: int | 
     return None
 
 
+# Find the card ID connected to a selectable option.
+# For PLAY options, the option index points into our hand.
 def _card_id_for_option(obs: Observation, option: Option) -> int | None:
     if option.type == OptionType.PLAY:
         card = _card_from_area(obs, AreaType.HAND, option.index, obs.current.yourIndex)
@@ -181,11 +201,13 @@ def _card_id_for_option(obs: Observation, option: Option) -> int | None:
     return None if card is None else card.id
 
 
+# Find the Pokemon being targeted by an option, such as an Energy attachment target.
 def _target_id_for_option(obs: Observation, option: Option) -> int | None:
     card = _card_from_area(obs, option.inPlayArea, option.inPlayIndex, obs.current.yourIndex)
     return None if card is None else card.id
 
 
+# Check whether a given damage amount would Knock Out the opponent's Active Pokemon.
 def _active_can_be_knocked_out(obs: Observation, damage: int) -> bool:
     opponent = _opponent_state(obs)
     if opponent is None or len(opponent.active) == 0 or opponent.active[0] is None:
@@ -193,10 +215,12 @@ def _active_can_be_knocked_out(obs: Observation, damage: int) -> bool:
     return opponent.active[0].hp <= damage
 
 
+# Check whether attacking is currently one of our legal choices.
 def _has_attack_option(obs: Observation) -> bool:
     return any(option.type == OptionType.ATTACK for option in obs.select.option)
 
 
+# Score yes/no prompts, like "do you want to go first?"
 def _score_yes_no(obs: Observation, option: Option) -> int:
     if option.type == OptionType.YES:
         if obs.select.context == SelectContext.IS_FIRST:
@@ -225,6 +249,8 @@ def _score_yes_no(obs: Observation, option: Option) -> int:
     return 0
 
 
+# Score card-picking prompts, such as setup choices, search targets,
+# discard costs, and choosing which Pokemon receives an effect.
 def _score_card_selection(obs: Observation, option: Option) -> int:
     if option.type == OptionType.NUMBER:
         return option.number or 0
@@ -267,6 +293,8 @@ def _score_card_selection(obs: Observation, option: Option) -> int:
     return POKEMON_SEARCH_PRIORITY.get(card_id, DISCARD_PRIORITY.get(card_id, 0))
 
 
+# Score main-turn actions like Attack, Evolve, Attach Energy, Play a card,
+# use an Ability, Retreat, or End Turn.
 def _score_main_action(obs: Observation, option: Option) -> int:
     if option.type == OptionType.ATTACK:
         if option.attackId == 1210 and _active_can_be_knocked_out(obs, 270):
@@ -332,6 +360,7 @@ def _score_main_action(obs: Observation, option: Option) -> int:
     return 0
 
 
+# Route each legal option to the correct scoring function based on option type.
 def _score_option(obs: Observation, option: Option) -> int:
     if option.type in {OptionType.YES, OptionType.NO}:
         return _score_yes_no(obs, option)
@@ -348,6 +377,8 @@ def _score_option(obs: Observation, option: Option) -> int:
     return _score_main_action(obs, option)
 
 
+# Pick the highest-scoring legal option indexes.
+# If the simulator allows choosing zero cards, we only choose positively scored options.
 def choose_options(obs: Observation) -> list[int]:
     scored_options = [
         (_score_option(obs, option), index)
@@ -363,6 +394,9 @@ def choose_options(obs: Observation) -> list[int]:
     chosen_count = max(obs.select.minCount, chosen_count)
     return [index for _, index in scored_options[:chosen_count]]
 
+
+# Kaggle calls this function every time the bot must make a decision.
+# First call: return the 60-card deck. Later calls: choose from legal options.
 def agent(obs_dict: dict) -> list[int]:
     """Implement Your Pokémon Trading Card Game Agent.
 
