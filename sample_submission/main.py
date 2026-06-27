@@ -273,6 +273,53 @@ def _has_attack_option(obs: Observation) -> bool:
     return any(option.type == OptionType.ATTACK for option in obs.select.option)
 
 
+def _lucario_is_active_and_healthy(obs: Observation) -> bool:
+    your = _your_state(obs)
+    if your is not None and your.active and your.active[0] is not None:
+        active = your.active[0]
+        if active.id == LUCARIO:
+            return active.hp > active.maxHp // 2
+    return False
+
+
+def _lucario_needs_energy(obs: Observation) -> bool:
+    your = _your_state(obs)
+    if your is None:
+        return False
+    # Check Active
+    if your.active and your.active[0] is not None and your.active[0].id == LUCARIO:
+        if not _pokemon_has_max_energy(your.active[0]):
+            return True
+    # Check Bench
+    for pokemon in your.bench:
+        if pokemon is not None and pokemon.id == LUCARIO:
+            if not _pokemon_has_max_energy(pokemon):
+                return True
+    return False
+
+
+def _has_playable_starter_or_lucario(obs: Observation) -> bool:
+    if obs.select is None or not obs.select.option:
+        return False
+    for option in obs.select.option:
+        if option.type == OptionType.PLAY:
+            card_id = _card_id_for_option(obs, option)
+            if card_id in BASIC_POKEMON:
+                if card_id == MEOWTH:
+                    hand = _hand_ids(obs)
+                    opponent = _opponent_state(obs)
+                    opp_active_low = opponent and opponent.active and opponent.active[0] and opponent.active[0].hp <= 30
+                    if not (len(hand) <= 3 or opp_active_low):
+                        continue
+                return True
+        if option.type == OptionType.EVOLVE:
+            card_id = _card_id_for_option(obs, option)
+            if card_id == LUCARIO:
+                return True
+    return False
+
+
+
 # Score yes/no prompts, like "do you want to go first?"
 def _score_yes_no(obs: Observation, option: Option) -> int:
     if option.type == OptionType.YES:
@@ -339,6 +386,16 @@ def _score_card_selection(obs: Observation, option: Option) -> int:
             return 250
 
     if obs.select.context == SelectContext.DISCARD:
+        initiator_id = None
+        if obs.select.contextCard is not None:
+            initiator_id = obs.select.contextCard.id
+        elif obs.select.effect is not None:
+            initiator_id = obs.select.effect.id
+            
+        if initiator_id == ULTRA_BALL and card_id == FIGHTING_ENERGY:
+            hand_energies = [cid for cid in _hand_ids(obs) if cid == FIGHTING_ENERGY]
+            if len(hand_energies) <= 2:
+                return -10000
         return DISCARD_PRIORITY.get(card_id, 200)
 
     if obs.select.context == SelectContext.TO_ACTIVE:
@@ -352,8 +409,14 @@ def _score_card_selection(obs: Observation, option: Option) -> int:
     if obs.select.context == SelectContext.ATTACH_TO:
         # Effects that attach Energy should not overfill a Pokemon past its attack needs.
         target = _card_from_area(obs, option.area, option.index, option.playerIndex)
-        if _pokemon_has_max_energy(target):
+        if target is not None and _pokemon_has_max_energy(target):
             return -200
+        target_id = None if target is None else target.id
+        if _lucario_needs_energy(obs):
+            if target_id == LUCARIO:
+                return 10000
+            else:
+                return -10000
         return ENERGY_TARGET_PRIORITY.get(card_id, STARTER_PRIORITY.get(card_id, 0))
 
     return POKEMON_SEARCH_PRIORITY.get(card_id, DISCARD_PRIORITY.get(card_id, 0))
@@ -378,7 +441,7 @@ def _score_main_action(obs: Observation, option: Option) -> int:
         card_id = _card_id_for_option(obs, option)
         target_bonus = 250 if option.inPlayArea == AreaType.BENCH else 0
         if card_id == LUCARIO and target_id == RIOLU:
-            return 780 + target_bonus
+            return 10000
         if card_id == HARIYAMA and target_id == MAKUHITA:
             if _hariyama_switch_needed(obs):
                 return 650 + target_bonus
@@ -392,6 +455,11 @@ def _score_main_action(obs: Observation, option: Option) -> int:
         target_id = None if target is None else target.id
         if target is not None and _pokemon_has_max_energy(target):
             return -200
+        if _lucario_needs_energy(obs):
+            if target_id == LUCARIO:
+                return 10000
+            else:
+                return -10000
         if card_id == FIGHTING_ENERGY:
             return 700 + ENERGY_TARGET_PRIORITY.get(target_id, 0)
         return 300 + ENERGY_TARGET_PRIORITY.get(target_id, 0)
@@ -408,14 +476,21 @@ def _score_main_action(obs: Observation, option: Option) -> int:
         card_id = _card_id_for_option(obs, option)
         hand = _hand_ids(obs)
         
-        # --- RULE 1: MEOWTH RESTRICTION ---
-        if card_id == MEOWTH:
-            opponent = _opponent_state(obs)
-            # Check for low hand size OR rough heuristic for "winning game with ability"
-            opp_active_low = opponent and opponent.active and opponent.active[0] and opponent.active[0].hp <= 30
-            if len(hand) <= 3 or opp_active_low:
-                return 850
-            return -1000
+        # --- Rule: Draw supporter restriction ---
+        draw_supporters = {UNFAIR_STAMP, LILLIE, JUDGE}
+        if card_id in draw_supporters:
+            if _has_playable_starter_or_lucario(obs):
+                return -10000
+
+        # --- Rule: Meowth & Starter prioritization ---
+        if card_id in BASIC_POKEMON:
+            if card_id == MEOWTH:
+                opponent = _opponent_state(obs)
+                opp_active_low = opponent and opponent.active and opponent.active[0] and opponent.active[0].hp <= 30
+                if len(hand) <= 3 or opp_active_low:
+                    return 9000
+                return -1000
+            return 9000
 
         # --- RULES 4 & 5: TRAINER PLAY PRIORITIES ---
         priority_items = {FIGHTING_GONG, POKE_PAD, ULTRA_BALL}
@@ -424,16 +499,11 @@ def _score_main_action(obs: Observation, option: Option) -> int:
         if card_id in priority_items:
             return 2000
             
-        draw_supporters = {UNFAIR_STAMP, LILLIE, JUDGE}
         if card_id in draw_supporters:
             if not has_priority_item:
                 return 1900
             else:
                 return PLAY_TRAINER_PRIORITY.get(card_id, 200)
-
-        # Standard play logic for other cards
-        if card_id in BASIC_POKEMON:
-            return STARTER_PRIORITY.get(card_id, 0)
             
         if card_id in PLAY_TRAINER_PRIORITY:
             score = PLAY_TRAINER_PRIORITY[card_id]
@@ -453,6 +523,9 @@ def _score_main_action(obs: Observation, option: Option) -> int:
         return 250
 
     if option.type == OptionType.RETREAT:
+        if _lucario_is_active_and_healthy(obs):
+            return -10000
+
         your = _your_state(obs)
         if your is not None and your.active and your.active[0] is not None:
             active_id = your.active[0].id
