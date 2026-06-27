@@ -106,7 +106,6 @@ DISCARD_PRIORITY = {
     FIGHTING_ENERGY: 700,
     GRAVITY_MOUNTAIN: 500,
     JUDGE: 440,
-    LILLIE: 430,
     UNFAIR_STAMP: 420,
     WALLYS_COMPASSION: 410,
     AIR_BALLOON: 350,
@@ -120,6 +119,7 @@ DISCARD_PRIORITY = {
     SOLROCK: 120,
     LUCARIO: 60,
     RIOLU: 40,
+    LILLIE: 0,
 }
 
 
@@ -243,6 +243,32 @@ def _can_find_lucario_next_turn(obs: Observation) -> bool:
     # Riolu is a better Active candidate when we can evolve it soon.
     hand = set(_hand_ids(obs))
     return LUCARIO in hand or ULTRA_BALL in hand
+
+
+def _is_riolu_able_to_be_evolved(obs: Observation) -> bool:
+    your = _your_state(obs)
+    if your is None:
+        return False
+    # Check Active Spot
+    if your.active and your.active[0] is not None:
+        active = your.active[0]
+        if active.id == RIOLU and not active.appearThisTurn:
+            return True
+    # Check Bench
+    for pokemon in your.bench:
+        if pokemon is not None and pokemon.id == RIOLU and not pokemon.appearThisTurn:
+            return True
+    return False
+
+
+def _has_enough_non_energy_discards(obs: Observation) -> bool:
+    hand = _hand_ids(obs)
+    if ULTRA_BALL not in hand:
+        return False
+    remaining_hand = hand.copy()
+    remaining_hand.remove(ULTRA_BALL)
+    non_energy_count = sum(1 for cid in remaining_hand if cid != FIGHTING_ENERGY)
+    return non_energy_count >= 2
 
 
 def _bench_promotion_score(obs: Observation, card_id: int) -> int:
@@ -393,9 +419,7 @@ def _score_card_selection(obs: Observation, option: Option) -> int:
             initiator_id = obs.select.effect.id
             
         if initiator_id == ULTRA_BALL and card_id == FIGHTING_ENERGY:
-            hand_energies = [cid for cid in _hand_ids(obs) if cid == FIGHTING_ENERGY]
-            if len(hand_energies) <= 2:
-                return -10000
+            return -10000
         return DISCARD_PRIORITY.get(card_id, 200)
 
     if obs.select.context == SelectContext.TO_ACTIVE:
@@ -467,7 +491,7 @@ def _score_main_action(obs: Observation, option: Option) -> int:
     if option.type == OptionType.ABILITY:
         card_id = _card_id_for_option(obs, option)
         if card_id == LUNATONE:
-            return 730
+            return 9500
         if card_id == MEOWTH:
             return 250
         return 500
@@ -476,6 +500,11 @@ def _score_main_action(obs: Observation, option: Option) -> int:
         card_id = _card_id_for_option(obs, option)
         hand = _hand_ids(obs)
         
+        # --- Rule: Ultra Ball restriction ---
+        if card_id == ULTRA_BALL:
+            if not (_is_riolu_able_to_be_evolved(obs) and _has_enough_non_energy_discards(obs)):
+                return -10000
+
         # --- Rule: Draw supporter restriction ---
         draw_supporters = {UNFAIR_STAMP, LILLIE, JUDGE}
         if card_id in draw_supporters:
@@ -497,7 +526,12 @@ def _score_main_action(obs: Observation, option: Option) -> int:
         has_priority_item = any(item in hand for item in priority_items)
         
         if card_id in priority_items:
-            return 2000
+            if card_id == FIGHTING_GONG:
+                return 2300
+            if card_id == POKE_PAD:
+                return 2200
+            if card_id == ULTRA_BALL:
+                return 2300
             
         if card_id in draw_supporters:
             if not has_priority_item:
